@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+#
+# gwt - Git Worktree manager
+#
+# Usage: gwt <command> [args]
+#
+# A collection of utilities to streamline git worktree workflows.
+
+set -e
+
+GWT_VERSION="1.0.0"
+GWT_DIR="$(dirname "$(realpath "$0")")"
+
+# Colors (disabled if not a terminal)
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    BLUE=$'\033[0;34m'
+    BOLD=$'\033[1m'
+    NC=$'\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' NC=''
+fi
+
+show_usage() {
+    cat <<EOF
+${BOLD}gwt${NC} - Git Worktree manager v${GWT_VERSION}
+
+${BOLD}USAGE${NC}
+    gwt <command> [args]
+
+${BOLD}COMMANDS${NC}
+    clone <url> [name]      Clone a repo with bare + worktree structure
+    init                    Convert existing clone to gwt structure
+    add <branch> [base]     Create a new branch + worktree
+    switch <branch>         Create worktree for existing branch
+    agent <branch> [base]   Create an ephemeral worktree in ~/.worktrees
+    ls                      List all worktrees for current repo
+    status                  Show status across all worktrees
+    rm <branch|path>        Remove a worktree and its local branch
+    clean                   Remove all ephemeral worktrees in ~/.worktrees
+    help                    Show this help message
+
+${BOLD}EXAMPLES${NC}
+    gwt add feat-auth                  # New worktree based on origin/main
+    gwt add feat-auth develop          # New worktree based on develop
+    gwt agent pr-review-42             # Ephemeral worktree for quick task
+    gwt ls                             # See all worktrees
+    gwt rm feat-auth                   # Remove worktree and branch
+    gwt clean                          # Nuke all agent worktrees
+
+${BOLD}CONFIGURATION${NC}
+    GWT_WORKTREE_DIR    Where ephemeral worktrees go (default: ~/.worktrees)
+
+EOF
+}
+
+# Ensure we're in a git repo
+check_git_repo() {
+    if ! git rev-parse --git-dir &>/dev/null; then
+        echo -e "${RED}error:${NC} not a git repository" >&2
+        exit 1
+    fi
+}
+
+# Main dispatch
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+    clone|init|add|switch|agent|ls|status|rm|clean|help)
+        if [[ -x "$GWT_DIR/gwt-$cmd" ]]; then
+            exec "$GWT_DIR/gwt-$cmd" "$@"
+        else
+            echo -e "${RED}error:${NC} command '$cmd' not found" >&2
+            exit 1
+        fi
+        ;;
+    -h|--help)
+        show_usage
+        ;;
+    -v|--version)
+        echo "gwt version $GWT_VERSION"
+        ;;
+    *)
+        echo -e "${RED}error:${NC} unknown command '$cmd'" >&2
+        echo ""
+        show_usage
+        exit 1
+        ;;
+esac

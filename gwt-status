@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+#
+# gwt-status - Show status across all worktrees
+#
+# Usage: gwt status
+
+set -e
+
+# Colors
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    BLUE=$'\033[0;34m'
+    CYAN=$'\033[0;36m'
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    NC=$'\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' BOLD='' DIM='' NC=''
+fi
+
+show_usage() {
+    cat <<EOF
+${BOLD}gwt status${NC} - Show status across all worktrees
+
+${BOLD}USAGE${NC}
+    gwt status
+
+${BOLD}OUTPUT${NC}
+    For each worktree, shows:
+    - Branch name
+    - Uncommitted changes (staged/unstaged)
+    - Ahead/behind remote tracking branch
+
+${BOLD}EXAMPLES${NC}
+    gwt status             # Check all worktrees
+
+EOF
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    show_usage
+    exit 0
+fi
+
+# Ensure we're in a git repo
+if ! git rev-parse --git-dir &>/dev/null; then
+    echo -e "${RED}error:${NC} not a git repository" >&2
+    exit 1
+fi
+
+# Fetch to get latest remote state (quiet, don't fail if offline)
+echo -e "${DIM}Fetching from origin...${NC}"
+git fetch origin --quiet 2>/dev/null || echo -e "${DIM}(fetch skipped - offline?)${NC}"
+echo ""
+
+# Configuration
+ephemeral_dir="${GWT_WORKTREE_DIR:-$HOME/.worktrees}"
+
+# Get current worktree path (may be empty if at project root)
+current_wt=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+
+echo -e "${BOLD}Worktree Status${NC}"
+echo ""
+
+# Parse worktree list
+worktrees=$(git worktree list --porcelain)
+
+wt_path=""
+wt_branch=""
+
+while IFS= read -r line; do
+    if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
+        wt_path="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^branch\ refs/heads/(.+)$ ]]; then
+        wt_branch="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^detached$ ]]; then
+        wt_branch="(detached)"
+    elif [[ -z "$line" ]] && [[ -n "$wt_path" ]]; then
+        # End of entry, process this worktree
+
+        # Skip bare repo entries
+        if [[ "$wt_path" == *".bare" ]] || [[ ! -d "$wt_path" ]]; then
+            wt_path="" wt_branch=""
+            continue
+        fi
+
+        # Current marker
+        if [[ "$wt_path" == "$current_wt" ]]; then
+            marker="${GREEN}*${NC} "
+        else
+            marker="  "
+        fi
+
+        # Type label
+        if [[ "$wt_path" == "$ephemeral_dir"* ]]; then
+            type_label="${YELLOW}agent${NC}"
+        else
+            type_label="${BLUE}local${NC}"
+        fi
+
+        # Branch display
+        branch_display="${CYAN}${wt_branch}${NC}"
+
+        # Get status info
+        staged=0
+        unstaged=0
+        untracked=0
+        ahead=0
+        behind=0
+
+        if [[ -d "$wt_path" ]]; then
+            # Count staged changes
+            staged=$(git -C "$wt_path" diff --cached --numstat 2>/dev/null | wc -l | tr -d ' ')
+
+            # Count unstaged changes
+            unstaged=$(git -C "$wt_path" diff --numstat 2>/dev/null | wc -l | tr -d ' ')
+
+            # Count untracked files
+            untracked=$(git -C "$wt_path" ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')
+
+            # Get ahead/behind
+            if [[ "$wt_branch" != "(detached)" ]]; then
+                tracking=$(git -C "$wt_path" rev-parse --abbrev-ref "${wt_branch}@{upstream}" 2>/dev/null || echo "")
+                if [[ -n "$tracking" ]]; then
+                    ahead_behind=$(git -C "$wt_path" rev-list --left-right --count "${wt_branch}...${tracking}" 2>/dev/null || echo "0 0")
+                    ahead=$(echo "$ahead_behind" | awk '{print $1}')
+                    behind=$(echo "$ahead_behind" | awk '{print $2}')
+                fi
+            fi
+        fi
+
+        # Build status string
+        status_parts=()
+
+        if [[ "$staged" -gt 0 ]]; then
+            status_parts+=("${GREEN}+${staged} staged${NC}")
+        fi
+        if [[ "$unstaged" -gt 0 ]]; then
+            status_parts+=("${YELLOW}~${unstaged} modified${NC}")
+        fi
+        if [[ "$untracked" -gt 0 ]]; then
+            status_parts+=("${DIM}?${untracked} untracked${NC}")
+        fi
+        if [[ "$ahead" -gt 0 ]]; then
+            status_parts+=("${CYAN}↑${ahead}${NC}")
+        fi
+        if [[ "$behind" -gt 0 ]]; then
+            status_parts+=("${RED}↓${behind}${NC}")
+        fi
+
+        # Print worktree info
+        echo -e "${marker}${branch_display}  [${type_label}]"
+        echo -e "    ${DIM}${wt_path}${NC}"
+
+        if [[ ${#status_parts[@]} -gt 0 ]]; then
+            status_str=$(IFS=', '; echo "${status_parts[*]}")
+            echo -e "    ${status_str}"
+        else
+            echo -e "    ${GREEN}clean${NC}"
+        fi
+        echo ""
+
+        # Reset for next entry
+        wt_path="" wt_branch=""
+    fi
+done <<< "$worktrees"
+
+# Handle last entry
+if [[ -n "$wt_path" ]] && [[ "$wt_path" != *".bare" ]] && [[ -d "$wt_path" ]]; then
+    if [[ "$wt_path" == "$current_wt" ]]; then
+        marker="${GREEN}*${NC} "
+    else
+        marker="  "
+    fi
+
+    if [[ "$wt_path" == "$ephemeral_dir"* ]]; then
+        type_label="${YELLOW}agent${NC}"
+    else
+        type_label="${BLUE}local${NC}"
+    fi
+
+    branch_display="${CYAN}${wt_branch}${NC}"
+
+    echo -e "${marker}${branch_display}  [${type_label}]"
+    echo -e "    ${DIM}${wt_path}${NC}"
+    echo -e "    ${GREEN}clean${NC}"
+    echo ""
+fi

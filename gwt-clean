@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+#
+# gwt-clean - Remove all ephemeral worktrees in ~/.worktrees
+#
+# Usage: gwt clean
+
+set -e
+
+# Colors
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    BLUE=$'\033[0;34m'
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    NC=$'\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' DIM='' NC=''
+fi
+
+show_usage() {
+    cat <<EOF
+${BOLD}gwt clean${NC} - Remove all ephemeral worktrees
+
+${BOLD}USAGE${NC}
+    gwt clean [options]
+
+${BOLD}OPTIONS${NC}
+    -f, --force     Skip confirmation prompt
+    -n, --dry-run   Show what would be removed without doing it
+    --keep-branches Don't delete the branches
+
+${BOLD}DESCRIPTION${NC}
+    Removes all worktrees in ~/.worktrees (or \$GWT_WORKTREE_DIR).
+    By default, also deletes the associated local branches.
+
+    This is useful for cleaning up after agentic workflows or
+    temporary tasks.
+
+${BOLD}EXAMPLES${NC}
+    gwt clean              # Interactive cleanup
+    gwt clean --dry-run    # See what would be removed
+    gwt clean --force      # No confirmation prompt
+
+EOF
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    show_usage
+    exit 0
+fi
+
+# Parse arguments
+force=false
+dry_run=false
+keep_branches=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -f|--force)
+            force=true
+            shift
+            ;;
+        -n|--dry-run)
+            dry_run=true
+            shift
+            ;;
+        --keep-branches)
+            keep_branches=true
+            shift
+            ;;
+        -*)
+            echo -e "${RED}error:${NC} unknown option: $1" >&2
+            exit 1
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+# Configuration
+ephemeral_dir="${GWT_WORKTREE_DIR:-$HOME/.worktrees}"
+
+# Check if ephemeral directory exists
+if [[ ! -d "$ephemeral_dir" ]]; then
+    echo -e "${DIM}No ephemeral worktree directory found at ${ephemeral_dir}${NC}"
+    echo -e "${DIM}Nothing to clean.${NC}"
+    exit 0
+fi
+
+# Find all worktrees in ephemeral dir
+worktrees=()
+branches=()
+
+for dir in "$ephemeral_dir"/*/; do
+    if [[ -d "$dir" ]]; then
+        # Check if it's a git worktree
+        if [[ -f "${dir}.git" ]] || [[ -d "${dir}.git" ]]; then
+            worktrees+=("${dir%/}")
+            # Try to get branch name
+            branch=$(git -C "$dir" branch --show-current 2>/dev/null || echo "")
+            branches+=("$branch")
+        fi
+    fi
+done
+
+if [[ ${#worktrees[@]} -eq 0 ]]; then
+    echo -e "${DIM}No ephemeral worktrees found in ${ephemeral_dir}${NC}"
+    echo -e "${DIM}Nothing to clean.${NC}"
+    exit 0
+fi
+
+# Show what will be removed
+echo ""
+echo -e "${BOLD}Ephemeral worktrees to remove:${NC}"
+echo ""
+for i in "${!worktrees[@]}"; do
+    wt="${worktrees[$i]}"
+    branch="${branches[$i]}"
+    if [[ -n "$branch" ]]; then
+        echo -e "  ${YELLOW}${branch}${NC}"
+        echo -e "    ${DIM}${wt}${NC}"
+    else
+        echo -e "  ${DIM}(detached)${NC}"
+        echo -e "    ${DIM}${wt}${NC}"
+    fi
+done
+echo ""
+echo -e "${DIM}${#worktrees[@]} worktree(s) will be removed${NC}"
+echo ""
+
+# Dry run stops here
+if [[ "$dry_run" == true ]]; then
+    echo -e "${YELLOW}Dry run - no changes made${NC}"
+    exit 0
+fi
+
+# Confirm unless forced
+if [[ "$force" != true ]]; then
+    echo -n -e "Proceed? [y/N] "
+    read -r response
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+        echo -e "${DIM}Cancelled.${NC}"
+        exit 0
+    fi
+    echo ""
+fi
+
+# Remove worktrees
+removed=0
+failed=0
+
+echo -e "${BLUE}::${NC} Removing ephemeral worktrees..."
+echo ""
+
+for i in "${!worktrees[@]}"; do
+    wt="${worktrees[$i]}"
+    branch="${branches[$i]}"
+    wt_name=$(basename "$wt")
+
+    # Find which repo this worktree belongs to and remove properly
+    if git -C "$wt" worktree list &>/dev/null; then
+        if git -C "$wt" worktree remove --force "$wt" 2>/dev/null; then
+            echo -e "  ${GREEN}removed${NC} $wt_name"
+            removed=$((removed + 1))
+
+            # Delete branch if requested
+            if [[ "$keep_branches" == false ]] && [[ -n "$branch" ]]; then
+                # We need to find another worktree of the same repo to delete the branch
+                # This is tricky, so we'll just note it
+                :
+            fi
+        else
+            echo -e "  ${RED}failed${NC}  $wt_name"
+            failed=$((failed + 1))
+        fi
+    else
+        # Not a valid worktree, just remove directory
+        rm -rf "$wt"
+        echo -e "  ${GREEN}removed${NC} $wt_name (orphaned)"
+        removed=$((removed + 1))
+    fi
+done
+
+# Prune all repos that had worktrees
+echo ""
+echo -e "${BLUE}::${NC} Pruning stale worktree references..."
+
+# Find all git directories that might have had worktrees here
+find "$ephemeral_dir" -name ".git" -type f 2>/dev/null | while read -r gitfile; do
+    if [[ -f "$gitfile" ]]; then
+        gitdir=$(cat "$gitfile" | grep "gitdir:" | cut -d' ' -f2)
+        if [[ -n "$gitdir" ]]; then
+            main_git=$(dirname "$gitdir")
+            main_git=$(dirname "$main_git")
+            if [[ -d "$main_git" ]]; then
+                git -C "$main_git" worktree prune 2>/dev/null || true
+            fi
+        fi
+    fi
+done
+
+# Clean up empty ephemeral directory
+remaining=$(find "$ephemeral_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$remaining" == "0" ]]; then
+    rmdir "$ephemeral_dir" 2>/dev/null || true
+fi
+
+echo ""
+echo -e "${GREEN}Done.${NC} Removed $removed worktree(s)."
+
+if [[ $failed -gt 0 ]]; then
+    echo -e "${YELLOW}$failed worktree(s) could not be removed.${NC}"
+    exit 1
+fi

@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+#
+# gwt-switch - Create a worktree for an existing branch
+#
+# Usage: gwt switch <branch>
+#
+# Unlike 'gwt add' which creates a new branch, 'gwt switch' checks out
+# an existing local or remote branch into a new worktree.
+
+set -e
+
+# Colors
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    BLUE=$'\033[0;34m'
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    NC=$'\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' DIM='' NC=''
+fi
+
+show_usage() {
+    cat <<EOF
+${BOLD}gwt switch${NC} - Create a worktree for an existing branch
+
+${BOLD}USAGE${NC}
+    gwt switch <branch>
+
+${BOLD}ARGUMENTS${NC}
+    branch      Name of existing local or remote branch
+
+${BOLD}DESCRIPTION${NC}
+    Creates a worktree for a branch that already exists (locally or on remote).
+    Use this to check out a coworker's branch, review a PR, etc.
+
+    For creating NEW branches, use 'gwt add' instead.
+
+${BOLD}EXAMPLES${NC}
+    gwt switch feature-from-coworker
+    gwt switch origin/pr-123
+    gwt switch release/v2.0
+
+${BOLD}OUTPUT${NC}
+    Creates worktree at: <project-root>/<branch>/
+
+EOF
+}
+
+# Check arguments
+if [[ -z "$1" || "$1" == "-h" || "$1" == "--help" ]]; then
+    show_usage
+    exit 0
+fi
+
+# Ensure we're in a git repo
+if ! git rev-parse --git-dir &>/dev/null; then
+    echo -e "${RED}error:${NC} not a git repository" >&2
+    exit 1
+fi
+
+branch="$1"
+
+# Detect project root
+find_project_root() {
+    local dir=$(pwd)
+    while [[ "$dir" != "/" ]]; do
+        if [[ -d "$dir/.bare" ]]; then
+            echo "$dir"
+            return 0
+        fi
+        dir=$(dirname "$dir")
+    done
+
+    # Fallback: use worktree's parent (traditional layout)
+    local wt_root
+    wt_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+    dirname "$wt_root"
+}
+
+project_root=$(find_project_root)
+if [[ -z "$project_root" ]]; then
+    echo -e "${RED}error:${NC} could not determine project root" >&2
+    exit 1
+fi
+
+# Fetch latest
+echo -e "${BLUE}::${NC} Fetching from origin..."
+git fetch origin --quiet
+
+# Determine the actual branch to check out
+local_branch=""
+remote_branch=""
+checkout_ref=""
+
+# Clean up branch name (remove origin/ prefix if present for local branch name)
+if [[ "$branch" == origin/* ]]; then
+    local_branch="${branch#origin/}"
+    remote_branch="$branch"
+else
+    local_branch="$branch"
+    remote_branch="origin/$branch"
+fi
+
+# Check if local branch exists
+if git show-ref --verify --quiet "refs/heads/$local_branch"; then
+    echo -e "${YELLOW}note:${NC} using existing local branch '$local_branch'"
+    checkout_ref="$local_branch"
+# Check if remote branch exists
+elif git show-ref --verify --quiet "refs/remotes/$remote_branch"; then
+    echo -e "${BLUE}::${NC} Tracking remote branch '$remote_branch'"
+    checkout_ref="$local_branch"
+    # Will create local tracking branch
+else
+    echo -e "${RED}error:${NC} branch '$branch' not found locally or on remote" >&2
+    echo -e "${DIM}hint:  run 'git fetch origin' or check branch name${NC}" >&2
+    echo -e "${DIM}hint:  use 'gwt add <branch>' to create a new branch${NC}" >&2
+    exit 1
+fi
+
+# Sanitize branch name for directory (replace / with -)
+dir_name=$(echo "$local_branch" | tr '/' '-')
+worktree_path="${project_root}/${dir_name}"
+
+# Check if worktree path already exists
+if [[ -e "$worktree_path" ]]; then
+    echo -e "${RED}error:${NC} path already exists: ${worktree_path}" >&2
+    exit 1
+fi
+
+# Check if branch is already checked out in another worktree
+existing_wt=$(git worktree list --porcelain | grep -A1 "^branch refs/heads/${local_branch}$" | grep "^worktree " | head -1 | sed 's/^worktree //' || echo "")
+if [[ -n "$existing_wt" ]]; then
+    echo -e "${RED}error:${NC} branch '$local_branch' is already checked out at:" >&2
+    echo -e "  ${DIM}${existing_wt}${NC}" >&2
+    exit 1
+fi
+
+# Create the worktree
+echo -e "${BLUE}::${NC} Creating worktree..."
+if git show-ref --verify --quiet "refs/heads/$local_branch"; then
+    # Local branch exists, just check it out
+    git worktree add "$worktree_path" "$local_branch" --quiet
+else
+    # Create local branch tracking remote
+    git worktree add "$worktree_path" -b "$local_branch" "$remote_branch" --quiet
+fi
+
+# Get some info for output
+current_sha=$(git -C "$worktree_path" rev-parse --short HEAD)
+
+# Success output
+echo ""
+echo -e "${GREEN}Created worktree${NC}"
+echo -e "  ${BOLD}branch:${NC}   $local_branch"
+echo -e "  ${BOLD}commit:${NC}   $current_sha"
+echo -e "  ${BOLD}path:${NC}     $worktree_path"
+echo ""
+echo -e "${DIM}To enter:${NC}  cd $worktree_path"

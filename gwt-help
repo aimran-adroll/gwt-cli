@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+#
+# gwt-help - Show help for gwt commands
+#
+# Usage: gwt help [command]
+
+set -e
+
+GWT_DIR="$(dirname "$(realpath "$0")")"
+
+# Colors
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    BLUE=$'\033[0;34m'
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    NC=$'\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' DIM='' NC=''
+fi
+
+# If a specific command is requested, show its help
+if [[ -n "$1" ]] && [[ "$1" != "-h" ]] && [[ "$1" != "--help" ]]; then
+    cmd="$1"
+    if [[ -x "$GWT_DIR/gwt-$cmd" ]]; then
+        exec "$GWT_DIR/gwt-$cmd" --help
+    else
+        echo -e "${RED}error:${NC} unknown command '$cmd'" >&2
+        exit 1
+    fi
+fi
+
+# Show main help
+GWT_VERSION="1.0.0"
+
+cat <<EOF
+${BOLD}gwt${NC} - Git Worktree manager v${GWT_VERSION}
+
+${BOLD}USAGE${NC}
+    gwt <command> [args]
+
+${BOLD}COMMANDS${NC}
+    clone <url> [name]      Clone a repo with bare + worktree structure
+    init                    Convert existing clone to gwt structure
+    add <branch> [base]     Create a new branch + worktree
+    switch <branch>         Create worktree for existing branch
+    agent <branch> [base]   Create an ephemeral worktree in ~/.worktrees
+    ls                      List all worktrees for current repo
+    status                  Show status across all worktrees
+    rm <branch|path>        Remove a worktree and its local branch
+    clean                   Remove all ephemeral worktrees in ~/.worktrees
+    help [command]          Show help (optionally for a specific command)
+
+${BOLD}QUICK START${NC}
+    gwt clone git@github.com:user/repo.git
+    cd repo/main
+
+${BOLD}WORKFLOW${NC}
+    # After clone, you're here:
+    cd ~/dev/repo/main
+
+    # Create feature worktrees (new branch):
+    gwt add feat-auth
+    # Creates: ~/dev/repo/feat-auth/
+
+    # Check out existing branch:
+    gwt switch coworker-feature
+    # Creates: ~/dev/repo/coworker-feature/
+
+    # Create ephemeral worktrees for agents/reviews:
+    gwt agent quick-fix
+    # Creates: ~/.worktrees/repo--quick-fix/
+
+    # See all worktrees and their status:
+    gwt ls                   # list worktrees
+    gwt status               # show uncommitted changes, ahead/behind
+
+    # Clean up:
+    gwt rm feat-auth         # remove one worktree
+    gwt clean                # remove all ephemeral worktrees
+
+${BOLD}MIGRATING EXISTING REPOS${NC}
+    cd ~/dev/existing-repo
+    gwt init                 # converts to gwt structure
+
+${BOLD}CONFIGURATION${NC}
+    GWT_WORKTREE_DIR    Where ephemeral worktrees go (default: ~/.worktrees)
+
+${BOLD}MORE INFO${NC}
+    Run 'gwt help <command>' for detailed help on a specific command.
+
+EOF

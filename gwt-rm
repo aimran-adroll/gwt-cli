@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+#
+# gwt-rm - Remove a worktree and optionally delete its branch
+#
+# Usage: gwt rm <branch|path>
+
+set -e
+
+# Colors
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    BLUE=$'\033[0;34m'
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    NC=$'\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' DIM='' NC=''
+fi
+
+show_usage() {
+    cat <<EOF
+${BOLD}gwt rm${NC} - Remove a worktree
+
+${BOLD}USAGE${NC}
+    gwt rm <branch|path>
+
+${BOLD}ARGUMENTS${NC}
+    branch|path     Branch name or full path to the worktree
+
+${BOLD}OPTIONS${NC}
+    -f, --force     Force removal even with uncommitted changes
+    --keep-branch   Don't delete the local branch after removal
+
+${BOLD}EXAMPLES${NC}
+    gwt rm feat-auth              # Remove by branch name
+    gwt rm ~/dev/myproject/feat   # Remove by path
+    gwt rm feat-auth --force      # Force remove with uncommitted changes
+    gwt rm feat-auth --keep-branch # Keep the branch after removing worktree
+
+${BOLD}NOTES${NC}
+    - Cannot remove the worktree you're currently in
+    - By default, also deletes the local branch (if it was fully merged)
+    - Use --force to remove worktrees with uncommitted changes
+    - Use --keep-branch to preserve the branch for later
+
+EOF
+}
+
+# Check arguments
+if [[ -z "$1" || "$1" == "-h" || "$1" == "--help" ]]; then
+    show_usage
+    exit 0
+fi
+
+# Ensure we're in a git repo
+if ! git rev-parse --git-dir &>/dev/null; then
+    echo -e "${RED}error:${NC} not a git repository" >&2
+    exit 1
+fi
+
+# Parse arguments
+target=""
+force=""
+keep_branch=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -f|--force)
+            force="--force"
+            shift
+            ;;
+        --keep-branch)
+            keep_branch=true
+            shift
+            ;;
+        -*)
+            echo -e "${RED}error:${NC} unknown option: $1" >&2
+            exit 1
+            ;;
+        *)
+            target="$1"
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "$target" ]]; then
+    echo -e "${RED}error:${NC} no branch or path specified" >&2
+    show_usage
+    exit 1
+fi
+
+# Configuration
+ephemeral_dir="${GWT_WORKTREE_DIR:-$HOME/.worktrees}"
+
+# Find the worktree
+# First, check if it's a path
+if [[ "$target" == /* ]] && [[ -d "$target" ]]; then
+    wt_path="$target"
+    # Extract branch from worktree
+    wt_branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || echo "")
+else
+    # Assume it's a branch name, search for it
+    wt_path=""
+    wt_branch="$target"
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
+            current_path="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^branch\ refs/heads/(.+)$ ]]; then
+            current_branch="${BASH_REMATCH[1]}"
+            if [[ "$current_branch" == "$target" ]]; then
+                wt_path="$current_path"
+                break
+            fi
+        elif [[ -z "$line" ]]; then
+            current_path="" current_branch=""
+        fi
+    done <<< "$(git worktree list --porcelain)"
+fi
+
+if [[ -z "$wt_path" ]]; then
+    echo -e "${RED}error:${NC} no worktree found for '${target}'" >&2
+    echo -e "${DIM}hint:  run 'gwt ls' to see all worktrees${NC}" >&2
+    exit 1
+fi
+
+# Check we're not removing current worktree (if we're in one)
+current_wt=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+if [[ -n "$current_wt" ]] && [[ "$wt_path" == "$current_wt" ]]; then
+    echo -e "${RED}error:${NC} cannot remove the current worktree" >&2
+    echo -e "${DIM}hint:  cd to a different worktree first${NC}" >&2
+    exit 1
+fi
+
+# Check for uncommitted changes if not forcing
+if [[ -z "$force" ]]; then
+    if [[ -d "$wt_path" ]] && ! git -C "$wt_path" diff --quiet 2>/dev/null; then
+        echo -e "${RED}error:${NC} worktree has uncommitted changes" >&2
+        echo -e "${DIM}hint:  use 'gwt rm $target --force' to remove anyway${NC}" >&2
+        exit 1
+    fi
+    if [[ -d "$wt_path" ]] && ! git -C "$wt_path" diff --cached --quiet 2>/dev/null; then
+        echo -e "${RED}error:${NC} worktree has staged changes" >&2
+        echo -e "${DIM}hint:  use 'gwt rm $target --force' to remove anyway${NC}" >&2
+        exit 1
+    fi
+fi
+
+# Determine type for output
+if [[ "$wt_path" == "$ephemeral_dir"* ]]; then
+    type_label="ephemeral"
+else
+    type_label="persistent"
+fi
+
+echo -e "${BLUE}::${NC} Removing $type_label worktree..."
+
+# Remove the worktree
+git worktree remove $force "$wt_path"
+
+echo -e "${GREEN}Removed worktree${NC}"
+echo -e "  ${BOLD}path:${NC}   $wt_path"
+
+# Delete the branch if requested and it exists
+if [[ -n "$wt_branch" ]] && [[ "$keep_branch" == false ]]; then
+    if git show-ref --verify --quiet "refs/heads/$wt_branch"; then
+        # Try to delete normally first (checks if merged)
+        if git branch -d "$wt_branch" 2>/dev/null; then
+            echo -e "  ${BOLD}branch:${NC} $wt_branch (deleted)"
+        elif [[ -n "$force" ]]; then
+            git branch -D "$wt_branch" 2>/dev/null
+            echo -e "  ${BOLD}branch:${NC} $wt_branch (force deleted)"
+        else
+            echo -e "  ${BOLD}branch:${NC} $wt_branch (kept - not fully merged)"
+            echo -e "${DIM}hint:  use --force to delete unmerged branch${NC}"
+        fi
+    fi
+elif [[ "$keep_branch" == true ]] && [[ -n "$wt_branch" ]]; then
+    echo -e "  ${BOLD}branch:${NC} $wt_branch (kept)"
+fi
+
+# Prune any stale worktree references
+git worktree prune --quiet

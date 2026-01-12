@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+#
+# gwt-add - Create a persistent worktree under the project directory
+#
+# Usage: gwt add <branch> [base]
+#
+# Creates a new worktree alongside your current project directory.
+# The worktree is created at: <project-parent>/<branch>/
+
+set -e
+
+# Colors
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    BLUE=$'\033[0;34m'
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    NC=$'\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' DIM='' NC=''
+fi
+
+show_usage() {
+    cat <<EOF
+${BOLD}gwt add${NC} - Create a persistent worktree
+
+${BOLD}USAGE${NC}
+    gwt add <branch> [base]
+
+${BOLD}ARGUMENTS${NC}
+    branch      Name for the new branch (required)
+    base        Base branch/commit to branch from (default: origin/main)
+
+${BOLD}EXAMPLES${NC}
+    gwt add feat-auth                   # Branch from origin/main
+    gwt add feat-auth origin/develop    # Branch from remote develop
+    gwt add hotfix-123 v2.0.0           # Branch from a tag
+
+${BOLD}BEST PRACTICE${NC}
+    Prefer origin/<branch> over local branch names:
+      gwt add feat-x origin/main     # fresh from remote
+      gwt add feat-x main            # might be stale
+
+    The script fetches before branching, so origin/* refs are current.
+    Local branches may be behind if you haven't pulled recently.
+
+${BOLD}OUTPUT${NC}
+    Creates worktree at: <project-root>/<branch>/
+
+EOF
+}
+
+# Check arguments
+if [[ -z "$1" || "$1" == "-h" || "$1" == "--help" ]]; then
+    show_usage
+    exit 0
+fi
+
+# Ensure we're in a git repo
+if ! git rev-parse --git-dir &>/dev/null; then
+    echo -e "${RED}error:${NC} not a git repository" >&2
+    exit 1
+fi
+
+branch="$1"
+base="${2:-origin/main}"
+
+# Detect project root: either we're at it (has .bare/) or inside a worktree
+find_project_root() {
+    # Check if .bare exists in current or parent directories
+    local dir=$(pwd)
+    while [[ "$dir" != "/" ]]; do
+        if [[ -d "$dir/.bare" ]]; then
+            echo "$dir"
+            return 0
+        fi
+        dir=$(dirname "$dir")
+    done
+
+    # Fallback: use worktree's parent (traditional layout)
+    local wt_root
+    wt_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+    dirname "$wt_root"
+}
+
+project_root=$(find_project_root)
+if [[ -z "$project_root" ]]; then
+    echo -e "${RED}error:${NC} could not determine project root" >&2
+    echo -e "${DIM}hint:  run from a worktree or project directory${NC}" >&2
+    exit 1
+fi
+
+worktree_path="${project_root}/${branch}"
+
+# Check if branch already exists
+if git show-ref --verify --quiet "refs/heads/$branch"; then
+    echo -e "${RED}error:${NC} branch '${branch}' already exists" >&2
+    echo -e "${DIM}hint:  use 'git worktree add <path> ${branch}' to check out existing branch${NC}" >&2
+    exit 1
+fi
+
+# Check if worktree path already exists
+if [[ -e "$worktree_path" ]]; then
+    echo -e "${RED}error:${NC} path already exists: ${worktree_path}" >&2
+    exit 1
+fi
+
+# Verify base exists
+if ! git rev-parse --verify "$base" &>/dev/null; then
+    echo -e "${RED}error:${NC} base '${base}' does not exist" >&2
+    echo -e "${DIM}hint:  run 'git fetch origin' to update remote refs${NC}" >&2
+    exit 1
+fi
+
+# Fetch latest
+echo -e "${BLUE}::${NC} Fetching from origin..."
+git fetch origin --quiet
+
+# Create the worktree
+echo -e "${BLUE}::${NC} Creating worktree..."
+git worktree add -b "$branch" "$worktree_path" "$base" --quiet
+
+# Get some info for output
+base_short=$(git rev-parse --short "$base")
+commit_msg=$(git log -1 --format="%s" "$base" | head -c 50)
+
+# Success output
+echo ""
+echo -e "${GREEN}Created worktree${NC}"
+echo -e "  ${BOLD}branch:${NC}   $branch"
+echo -e "  ${BOLD}base:${NC}     $base ($base_short)"
+echo -e "  ${BOLD}path:${NC}     $worktree_path"
+echo ""
+echo -e "${DIM}To enter:${NC}  cd $worktree_path"

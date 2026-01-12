@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+#
+# gwt-init - Convert an existing clone to bare + worktree structure
+#
+# Usage: gwt init
+#
+# Converts a regular git clone into the gwt bare + worktree structure,
+# allowing you to use gwt commands without re-cloning.
+
+set -e
+
+# Colors
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    BLUE=$'\033[0;34m'
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    NC=$'\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' DIM='' NC=''
+fi
+
+show_usage() {
+    cat <<EOF
+${BOLD}gwt init${NC} - Convert existing clone to gwt structure
+
+${BOLD}USAGE${NC}
+    gwt init
+
+${BOLD}DESCRIPTION${NC}
+    Converts a regular git clone into the bare + worktree structure
+    used by gwt. Run this from the root of an existing repository.
+
+    Before:
+        myrepo/
+        ├── .git/
+        └── src/
+
+    After:
+        myrepo/
+        ├── .git          # file pointing to .bare
+        ├── .bare/        # bare repository
+        └── main/         # worktree (your files moved here)
+            └── src/
+
+${BOLD}NOTES${NC}
+    - Requires a clean working tree (no uncommitted changes)
+    - Backs up .git to .git.bak in case of issues
+    - Run from repository root, not a subdirectory
+
+EOF
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    show_usage
+    exit 0
+fi
+
+# Check we're at repo root
+if [[ ! -d ".git" ]]; then
+    if [[ -f ".git" ]]; then
+        echo -e "${RED}error:${NC} already using worktree structure" >&2
+        exit 1
+    fi
+    echo -e "${RED}error:${NC} not at repository root (no .git directory)" >&2
+    echo -e "${DIM}hint:  run from the root of your git repository${NC}" >&2
+    exit 1
+fi
+
+# Check it's not already a bare repo
+if [[ "$(git rev-parse --is-bare-repository)" == "true" ]]; then
+    echo -e "${RED}error:${NC} already a bare repository" >&2
+    exit 1
+fi
+
+# Check for clean working tree
+if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    echo -e "${RED}error:${NC} working tree has uncommitted changes" >&2
+    echo -e "${DIM}hint:  commit or stash your changes first${NC}" >&2
+    exit 1
+fi
+
+# Get current branch
+current_branch=$(git branch --show-current)
+if [[ -z "$current_branch" ]]; then
+    echo -e "${RED}error:${NC} HEAD is detached, please checkout a branch first" >&2
+    exit 1
+fi
+
+project_dir=$(pwd)
+project_name=$(basename "$project_dir")
+
+echo -e "${BOLD}Converting ${project_name} to gwt structure${NC}"
+echo ""
+echo -e "  ${BOLD}current branch:${NC} $current_branch"
+echo -e "  ${BOLD}project dir:${NC}    $project_dir"
+echo ""
+
+# Confirm
+echo -e "${YELLOW}This will restructure your repository.${NC}"
+echo -e "Your files will be moved to: ${BOLD}${project_dir}/${current_branch}/${NC}"
+echo ""
+echo -n "Proceed? [y/N] "
+read -r response
+if [[ ! "$response" =~ ^[Yy]$ ]]; then
+    echo -e "${DIM}Cancelled.${NC}"
+    exit 0
+fi
+echo ""
+
+# Step 1: Create backup
+echo -e "${BLUE}::${NC} Backing up .git directory..."
+cp -r .git .git.bak
+
+# Step 2: Convert .git to bare and move to .bare
+echo -e "${BLUE}::${NC} Converting to bare repository..."
+git config --bool core.bare true
+mv .git .bare
+
+# Step 3: Create .git file pointing to .bare
+echo -e "${BLUE}::${NC} Creating .git pointer..."
+echo "gitdir: .bare" > .git
+
+# Step 4: Configure remote fetch
+git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+
+# Step 5: Create worktree directory and move files
+echo -e "${BLUE}::${NC} Moving files to ${current_branch}/ worktree..."
+mkdir -p "$current_branch"
+
+# Move all files except .git, .bare, .git.bak, and the new worktree dir
+for item in * .[!.]* ..?*; do
+    # Skip special entries
+    [[ "$item" == "." || "$item" == ".." ]] && continue
+    [[ "$item" == ".git" ]] && continue
+    [[ "$item" == ".bare" ]] && continue
+    [[ "$item" == ".git.bak" ]] && continue
+    [[ "$item" == "$current_branch" ]] && continue
+    [[ ! -e "$item" ]] && continue
+
+    mv "$item" "$current_branch/"
+done
+
+# Step 6: Set up worktree reference
+echo -e "${BLUE}::${NC} Registering worktree..."
+
+# Create worktrees directory in bare repo
+mkdir -p .bare/worktrees/"$current_branch"
+
+# Create gitdir file in worktree
+echo "gitdir: $(pwd)/.bare/worktrees/$current_branch" > "$current_branch/.git"
+
+# Create worktree admin files
+echo "$(pwd)/$current_branch" > .bare/worktrees/"$current_branch"/gitdir
+echo "ref: refs/heads/$current_branch" > .bare/worktrees/"$current_branch"/HEAD
+
+# Update bare repo's HEAD to not point to a branch (optional, for cleanliness)
+# git symbolic-ref HEAD refs/heads/"$current_branch"
+
+# Step 7: Verify
+echo -e "${BLUE}::${NC} Verifying setup..."
+if git -C "$current_branch" status &>/dev/null; then
+    # Clean up backup
+    rm -rf .git.bak
+
+    echo ""
+    echo -e "${GREEN}Conversion complete!${NC}"
+    echo ""
+    echo -e "  ${BOLD}project:${NC}  $project_dir"
+    echo -e "  ${BOLD}bare:${NC}     $project_dir/.bare"
+    echo -e "  ${BOLD}worktree:${NC} $project_dir/$current_branch"
+    echo ""
+    echo -e "${DIM}To continue working:${NC}"
+    echo -e "  cd $current_branch"
+    echo ""
+    echo -e "${DIM}Create more worktrees with:${NC}"
+    echo -e "  gwt add <branch>"
+else
+    # Something went wrong, restore backup
+    echo -e "${RED}error:${NC} verification failed, restoring backup..." >&2
+    rm -rf .bare .git "$current_branch"
+    mv .git.bak .git
+    git config --bool core.bare false
+    echo -e "${RED}Restoration complete. Please report this issue.${NC}" >&2
+    exit 1
+fi

@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+#
+# gwt-clone - Clone a repository using the bare repo + worktree pattern
+#
+# Usage: gwt clone <url> [name]
+#
+# Creates a project directory with a hidden .bare/ repo and an initial
+# main/ worktree, ready for the gwt workflow.
+
+set -e
+
+# Colors
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    BLUE=$'\033[0;34m'
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    NC=$'\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' DIM='' NC=''
+fi
+
+show_usage() {
+    cat <<EOF
+${BOLD}gwt clone${NC} - Clone a repository for worktree workflow
+
+${BOLD}USAGE${NC}
+    gwt clone <url> [name]
+
+${BOLD}ARGUMENTS${NC}
+    url         Git repository URL (required)
+    name        Directory name (default: derived from URL)
+
+${BOLD}EXAMPLES${NC}
+    gwt clone git@github.com:user/repo.git
+    gwt clone git@github.com:user/repo.git my-project
+    gwt clone https://github.com/user/repo.git
+
+${BOLD}OUTPUT${NC}
+    Creates:
+        <name>/
+        ├── .git        # points to .bare (enables git from project root)
+        ├── .bare/      # bare git repository
+        └── main/       # initial worktree on main branch
+
+${BOLD}WORKFLOW${NC}
+    After cloning:
+        cd <name>/main
+        gwt add feat-x      # create feature worktree
+        gwt agent task-1    # create ephemeral worktree
+
+EOF
+}
+
+# Check arguments
+if [[ -z "$1" || "$1" == "-h" || "$1" == "--help" ]]; then
+    show_usage
+    exit 0
+fi
+
+url="$1"
+name="$2"
+
+# Derive name from URL if not provided
+if [[ -z "$name" ]]; then
+    # Extract repo name from URL
+    # Handles: git@github.com:user/repo.git, https://github.com/user/repo.git, etc.
+    name=$(basename "$url" .git)
+fi
+
+# Validate name
+if [[ -z "$name" ]]; then
+    echo -e "${RED}error:${NC} could not determine project name from URL" >&2
+    echo -e "${DIM}hint:  provide a name explicitly: gwt clone <url> <name>${NC}" >&2
+    exit 1
+fi
+
+# Check if directory already exists
+if [[ -e "$name" ]]; then
+    echo -e "${RED}error:${NC} directory '$name' already exists" >&2
+    exit 1
+fi
+
+echo -e "${BLUE}::${NC} Cloning ${BOLD}${name}${NC} from ${DIM}${url}${NC}"
+echo ""
+
+# Create project directory
+mkdir -p "$name"
+cd "$name"
+project_dir=$(pwd)
+
+# Clone as bare repo into .bare/
+echo -e "${BLUE}::${NC} Creating bare repository..."
+git clone --bare "$url" .bare
+
+# Create .git file pointing to .bare (enables git commands from project root)
+echo "gitdir: .bare" > .git
+
+# Configure the bare repo to fetch all branches
+echo -e "${BLUE}::${NC} Configuring remote..."
+git --git-dir=.bare config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+
+# Fetch to populate remote tracking branches
+git --git-dir=.bare fetch origin
+
+# Create initial worktree on main
+echo -e "${BLUE}::${NC} Creating initial worktree on main..."
+
+# Check if main exists, fall back to master if not
+if git --git-dir=.bare show-ref --verify --quiet refs/remotes/origin/main; then
+    default_branch="main"
+elif git --git-dir=.bare show-ref --verify --quiet refs/remotes/origin/master; then
+    default_branch="master"
+    echo -e "${YELLOW}note:${NC} using 'master' as default branch (no 'main' found)"
+else
+    # Try to detect default branch from HEAD
+    default_branch=$(git --git-dir=.bare symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
+    echo -e "${YELLOW}note:${NC} using '${default_branch}' as default branch"
+fi
+
+git --git-dir=.bare worktree add ./main "$default_branch"
+
+# Success output
+echo ""
+echo -e "${GREEN}Cloned successfully${NC}"
+echo ""
+echo -e "  ${BOLD}project:${NC}  $project_dir"
+echo -e "  ${BOLD}bare:${NC}     $project_dir/.bare"
+echo -e "  ${BOLD}worktree:${NC} $project_dir/main ${DIM}[$default_branch]${NC}"
+echo ""
+echo -e "${DIM}To start working:${NC}"
+echo -e "  cd $project_dir/main"
+echo ""
+echo -e "${DIM}Create more worktrees with:${NC}"
+echo -e "  gwt add <branch>       ${DIM}# persistent worktree${NC}"
+echo -e "  gwt agent <branch>     ${DIM}# ephemeral worktree${NC}"
