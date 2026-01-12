@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# gwt-clean - Remove all ephemeral worktrees in ~/.worktrees
+# gwt-clean - Remove ephemeral worktrees for the current repo
 #
 # Usage: gwt clean
 
@@ -21,7 +21,7 @@ fi
 
 show_usage() {
     cat <<EOF
-${BOLD}gwt clean${NC} - Remove all ephemeral worktrees
+${BOLD}gwt clean${NC} - Remove ephemeral worktrees
 
 ${BOLD}USAGE${NC}
     gwt clean [options]
@@ -29,19 +29,20 @@ ${BOLD}USAGE${NC}
 ${BOLD}OPTIONS${NC}
     -f, --force     Skip confirmation prompt
     -n, --dry-run   Show what would be removed without doing it
+    --all           Clean ALL repos' ephemeral worktrees (not just current)
     --keep-branches Don't delete the branches
 
 ${BOLD}DESCRIPTION${NC}
-    Removes all worktrees in ~/.worktrees (or \$GWT_WORKTREE_DIR).
-    By default, also deletes the associated local branches.
+    Removes ephemeral worktrees in ~/.worktrees for the CURRENT repo only.
+    Use --all to clean worktrees from all repos.
 
-    This is useful for cleaning up after agentic workflows or
-    temporary tasks.
+    Ephemeral worktrees are named: <repo>--<branch>
+    This command only removes those matching the current repo.
 
 ${BOLD}EXAMPLES${NC}
-    gwt clean              # Interactive cleanup
+    gwt clean              # Clean current repo's ephemeral worktrees
     gwt clean --dry-run    # See what would be removed
-    gwt clean --force      # No confirmation prompt
+    gwt clean --all        # Clean ALL ephemeral worktrees (all repos)
 
 EOF
 }
@@ -55,6 +56,7 @@ fi
 force=false
 dry_run=false
 keep_branches=false
+clean_all=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -64,6 +66,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -n|--dry-run)
             dry_run=true
+            shift
+            ;;
+        --all)
+            clean_all=true
             shift
             ;;
         --keep-branches)
@@ -83,6 +89,39 @@ done
 # Configuration
 ephemeral_dir="${GWT_WORKTREE_DIR:-$HOME/.worktrees}"
 
+# Get current repo name (unless --all)
+repo_name=""
+if [[ "$clean_all" == false ]]; then
+    # Ensure we're in a git repo
+    if ! git rev-parse --git-dir &>/dev/null; then
+        echo -e "${RED}error:${NC} not a git repository" >&2
+        echo -e "${DIM}hint:  use --all to clean all repos' worktrees${NC}" >&2
+        exit 1
+    fi
+
+    # Find project root to get repo name
+    find_project_root() {
+        local dir=$(pwd)
+        while [[ "$dir" != "/" ]]; do
+            if [[ -d "$dir/.bare" ]]; then
+                echo "$dir"
+                return 0
+            fi
+            dir=$(dirname "$dir")
+        done
+        local wt_root
+        wt_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+        dirname "$wt_root"
+    }
+
+    project_root=$(find_project_root)
+    if [[ -z "$project_root" ]]; then
+        echo -e "${RED}error:${NC} could not determine project root" >&2
+        exit 1
+    fi
+    repo_name=$(basename "$project_root")
+fi
+
 # Check if ephemeral directory exists
 if [[ ! -d "$ephemeral_dir" ]]; then
     echo -e "${DIM}No ephemeral worktree directory found at ${ephemeral_dir}${NC}"
@@ -90,12 +129,22 @@ if [[ ! -d "$ephemeral_dir" ]]; then
     exit 0
 fi
 
-# Find all worktrees in ephemeral dir
+# Find matching worktrees in ephemeral dir
 worktrees=()
 branches=()
 
 for dir in "$ephemeral_dir"/*/; do
     if [[ -d "$dir" ]]; then
+        dir_name=$(basename "$dir")
+
+        # If not --all, filter by repo name prefix
+        if [[ "$clean_all" == false ]]; then
+            # Worktrees are named: <repo>--<branch>
+            if [[ "$dir_name" != "${repo_name}--"* ]]; then
+                continue
+            fi
+        fi
+
         # Check if it's a git worktree
         if [[ -f "${dir}.git" ]] || [[ -d "${dir}.git" ]]; then
             worktrees+=("${dir%/}")
@@ -107,14 +156,22 @@ for dir in "$ephemeral_dir"/*/; do
 done
 
 if [[ ${#worktrees[@]} -eq 0 ]]; then
-    echo -e "${DIM}No ephemeral worktrees found in ${ephemeral_dir}${NC}"
+    if [[ "$clean_all" == true ]]; then
+        echo -e "${DIM}No ephemeral worktrees found in ${ephemeral_dir}${NC}"
+    else
+        echo -e "${DIM}No ephemeral worktrees found for '${repo_name}'${NC}"
+    fi
     echo -e "${DIM}Nothing to clean.${NC}"
     exit 0
 fi
 
 # Show what will be removed
 echo ""
-echo -e "${BOLD}Ephemeral worktrees to remove:${NC}"
+if [[ "$clean_all" == true ]]; then
+    echo -e "${BOLD}Ephemeral worktrees to remove (ALL repos):${NC}"
+else
+    echo -e "${BOLD}Ephemeral worktrees to remove for '${repo_name}':${NC}"
+fi
 echo ""
 for i in "${!worktrees[@]}"; do
     wt="${worktrees[$i]}"
