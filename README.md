@@ -3,7 +3,7 @@
 A CLI tool for managing git worktrees with minimal friction. There are many similar ones but this one is mine. Built for developers juggling multiple branches, running parallel AI agents, or reviewing PRs without disrupting their flow.
 
 ### AI Disclosure: 
-Significant portion is authored by Opus 4.5 with exhaustive product guidance from me
+A large portion of the code was authored by Opus 4.5 with exhaustive product guidance from me
 
 ## Why gwt?
 
